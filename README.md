@@ -27,6 +27,4 @@ TODO:
 2) Use some LEDs to indicate connection status, and perhaps blink an LED, as BT packets are exchaged.
 
 
-KNOWN BUGS:
-
-None.
+KNOWN BUGS: None.
