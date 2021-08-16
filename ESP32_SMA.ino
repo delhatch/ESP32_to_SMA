@@ -71,7 +71,7 @@ prog_uchar PROGMEM  smanet2packet99[]= { 0x00,0x04,0x70,0x00};
 prog_uchar PROGMEM  smanet2packet0x01000000[]=  { 0x01,0x00,0x00,0x00};
 
 //Password needs to be 12 bytes long, with zeros as trailing bytes (Assume SMA INVERTER PIN code is 0000)
-const unsigned char  SMAInverterPasscode[]={'A','s','d','f','6','g','?','?',0,0,0,0};
+const unsigned char  SMAInverterPasscode[]={'0','0','0','0',0,0,0,0,0,0,0,0};
 
 // Function Prototypes
 void initialiseSMAConnection();
