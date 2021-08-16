@@ -1,5 +1,5 @@
 # ESP32_to_SMA
-This project uses an ESP32 to connect to an SMA inverter, using Bluetooth.
+This project uses an ESP32 to connect to an SMA SunnyBoy inverter, using Bluetooth.
 
 I have tested it with the SMA Model SB 8000US.
 This inverter model, circa 2013, has the Bluetooth feature added via an add-on module inside the inverter.
