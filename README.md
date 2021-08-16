@@ -11,7 +11,7 @@ NOTE: To connect to your ESP32 module, and your inverter, you'll need to change 
 CODE CHANGES:
 I modified / added / subtracted features (compared to nanodesmapvmonitor) in the following ways:
 
-1) It uses the DOIT ESP32 DEVKIT V1 module by Zerynth. (The nanodesmapvmonitor project uses an Arduino board + USB-to-Bluetooth dongle.) This code should run on nearly all ESP32 modules.
+1) It uses the DOIT ESP32 DEVKIT V1 module by Zerynth, and will probably run on most ESP32 modules. (The nanodesmapvmonitor project uses an Arduino board + USB-to-Bluetooth dongle.)
 
 2) Does not interfere with, and is not confused by, an existing SMA Sunny Beam display device. No cross-interference.
 
