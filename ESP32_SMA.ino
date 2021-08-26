@@ -79,7 +79,7 @@ prog_uchar PROGMEM smanet2totalyieldWh[] = { 0x54, 0x00, 0x01, 0x26, 0x00, 0xFF,
 prog_uchar PROGMEM smanet2settime[] = { 0x8c ,0x0a ,0x02 ,0x00 ,0xf0 ,0x00 ,0x6d ,0x23 ,0x00 ,0x00 ,0x6d ,0x23 ,0x00 ,0x00 ,0x6d ,0x23 ,0x00};
 
 //Password array needs to 12 bytes long, with zeros as trailing bytes (unused characters).
-const unsigned char  SMAInverterPasscode[]={'A','s','d','f','6','g','?','?',0,0,0,0};
+const unsigned char  SMAInverterPasscode[]={'0','0','0','0',0,0,0,0,0,0,0,0};
 
 // Function Prototypes
 void initialiseSMAConnection();

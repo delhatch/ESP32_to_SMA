@@ -13,8 +13,8 @@ const int output22 = 22;
 #define ADDRESS_SMAINVERTER_BTADDRESS  10
 
 
-unsigned char smaBTInverterAddressArray[6]={  0xC5,0xE3,0x27,0x25,0x80,0x00 };  // BT address of my SMA.
-unsigned char myBTAddress[6]={ 0x76,0xCF,0x6F,0xF2,0x3A,0x08 };  // BT address of my ESP32.
+unsigned char smaBTInverterAddressArray[6]={  0x0,0x0,0x0,0x25,0x80,0x00 };  // BT address of my SMA.
+unsigned char myBTAddress[6]={ 0x0,0x0,0x0,0xF2,0x3A,0x08 };  // BT address of my ESP32.
 
 // Function prototypes added by DRH
 int BTStart();
