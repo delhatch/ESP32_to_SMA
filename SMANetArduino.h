@@ -3,7 +3,7 @@
  SMANetArduino.h
  */
 
-#define maxlevel1packetsize 120
+#define maxlevel1packetsize 1000
 #define level1headerlength 18
 //const byte maxlevel1packetsize = 120;
 //const byte level1headerlength = 18;

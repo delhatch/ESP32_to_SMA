@@ -6,33 +6,14 @@
   Based on code found at https://github.com/stuartpittaway/nanodesmapvmonitor
  */
 
-//Need to change SoftwareSerial/NewSoftSerial.h file to set buffer to 128 bytes or you will get buffer overruns!
-//Find the line below and change
-//#define _NewSS_MAX_RX_BUFF 128 // RX buffer size
-
 #include "Arduino.h"
-//#include <avr/pgmspace.h>
-#include <ESP32Time.h>
-#include "time.h"
-//#include <NanodeMAC.h>
+#include "TimeLib.h"
 #include "bluetooth.h"
 #include "SMANetArduino.h"
+#include "Preferences.h"
 
-ESP32Time ESP32rtc;          // Time structure. Holds what time the ESP32 thinks it is.
-ESP32Time nextMidnight;   // Create a time structure to hold the answer to "What time (in time_t seconds) is the upcoming midnight?"
-
-//BST Start and end dates - this needs moving into some sort of PROGMEM array for the years or calculated based on the BST logic see 
-//http://www.time.org.uk/bstgmtcodepage1.aspx
-//static time_t SummerStart=1435888800;  //Sunday, 31 March 02:00:00 GMT
-//static time_t SummerEnd=1425952800;  //Sunday, 27 October 02:00:00 GMT
-
-//SMA inverter timezone (note inverter appears ignores summer time saving internally)
-//Need to determine what happens when its a NEGATIVE time zone !
-//Number of seconds for timezone 
-//    0=UTC (London)
-//19800=5.5hours Chennai, Kolkata
-//36000=Brisbane (UTC+10hrs)
-#define timeZoneOffset 60*60*0
+// Location = 47.4503, -122.3088  (Seattle airport)
+// Local time = GMT-8 hours (Normal), GMT-7 hours (DST)
 
 #undef debugMsgln 
 //#define debugMsgln(s) (__extension__(  {Serial.println(F(s));}  ))
@@ -42,36 +23,63 @@ ESP32Time nextMidnight;   // Create a time structure to hold the answer to "What
 //#define debugMsg(s) (__extension__(  {Serial.print(F(s));}  ))
 #define debugMsg(s) (__extension__(  { __asm__("nop\n\t");  }  ))
 
-//Do we switch off upload to sites when its dark?
-#undef allowsleep
+//Should I print the results of the time calculations?
+#define ShowTimeCalculations
 
-static unsigned long currentvalue=0;
-static unsigned int valuetype=0;
-static unsigned long value = 0;
-static unsigned long oldvalue = 0;
-static long lastRanTime = 0;
-static long nowTime = 0;
-static unsigned long spotpowerac=0;
-static unsigned long spotpowerdc=0;
+#define UPDATE_DELAY 4*SECS_PER_MIN*1000
+#define GARBAGE_DELAY 4*1000
+
+Preferences dailyData;
+
+static unsigned long currentvalue = 0;   // 4 bytes
+static unsigned int valuetype = 0;       // 4 bytes
+static unsigned long value = 0;         // Holds the data from the SMA inverter -- the value that was requested.
+static unsigned long spotpowerac = 0;     // result from getInstantACPower().
+static unsigned long spotpowerdc = 0;     // result from getInstantDCPower().
+static unsigned long dailyYield = 0;
+static unsigned long dailyConsumed = 0;
+static unsigned long yesterdayConsumed = 0;
+static unsigned long topDailyYield = 0;
+static unsigned long yesterdayTopDailyYield = 0;
+static long int lastRanTime = 0; // The last time (in millis() ) that we checked the AC power being generated.
+static long int lastGarbageTime = 0; // The last time (in millis() ) that we talked to the SMA, just to clear buffers.
+static long int nowTime = 0;     // The current program time, in millis().
+int bankUpdated = 0;    // if the bank value has not been updated, this value = 0;
+static int bank = 0;     // Will read from EEPROM.
+
 // "datetime" stores the number of seconds since the epoch (normally 01/01/1970), AS RETRIEVED
 //     from the SMA. The value is updated when data is read from the SMA, like when
 //     getInstantACPower() is called.
 //static unsigned long datetime=0;   // stores the number of seconds since the epoch (normally 01/01/1970)
-time_t datetime = 0;
+time_t datetime = 0;    // Time as read from the SMA inverter. In time_t seconds, UTC.   // sizeof(time_t) = 4 bytes. signed.
+time_t timeNow = 0;     // Time as read from the ESP32's RTC.
+time_t wakeUpNow = 0;   // Time to wake up and try to connect to the SMA inverter.
+
+bool calc_sunrise;      // Set to "true" to calculate the sunrise time. Set to "false" to calculate the sunset time.
+time_t nextSunrise;
+time_t nextSunset;
 
 const unsigned long seventy_years = 2208988800UL;
+int BTNowConnected;
+int trycount;
+bool asleep = 0;     // If true, do not try to talk to the SMA inverter.
 
-prog_uchar PROGMEM smanet2packetx80x00x02x00[] ={ 0x80, 0x00, 0x02, 0x00};
-prog_uchar PROGMEM smanet2packet2[]  ={ 0x80, 0x0E, 0x01, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+prog_uchar PROGMEM smanet2packetx80x00x02x00[] = { 0x80, 0x00, 0x02, 0x00};
+prog_uchar PROGMEM smanet2packet2[] = { 0x80, 0x0E, 0x01, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 prog_uchar PROGMEM SMANET2header[] = { 0xFF,0x03,0x60,0x65  };
 prog_uchar PROGMEM  InverterCodeArray[] = { 0x5c, 0xaf, 0xf0, 0x1d, 0x50, 0x00 };  // Fake address on the SMA NETWORK
-prog_uchar PROGMEM  fourzeros[]= { 0,0,0,0};
-prog_uchar PROGMEM  smanet2packet6[]={ 0x54, 0x00, 0x22, 0x26, 0x00, 0xFF, 0x22, 0x26, 0x00};
-prog_uchar PROGMEM  smanet2packet99[]= { 0x00,0x04,0x70,0x00};
-prog_uchar PROGMEM  smanet2packet0x01000000[]=  { 0x01,0x00,0x00,0x00};
+prog_uchar PROGMEM  fourzeros[] = { 0,0,0,0};
+prog_uchar PROGMEM  smanet2packet6[] = { 0x54, 0x00, 0x22, 0x26, 0x00, 0xFF, 0x22, 0x26, 0x00};
+prog_uchar PROGMEM  smanet2packet99[] = { 0x00,0x04,0x70,0x00};
+prog_uchar PROGMEM  smanet2packet0x01000000[] = { 0x01,0x00,0x00,0x00};
+prog_uchar PROGMEM smanet2acspotvalues[] = { 0x51, 0x00, 0x3f, 0x26, 0x00, 0xFF, 0x3f, 0x26, 0x00, 0x0e };
+prog_uchar PROGMEM smanet2packetdcpower[] = { 0x83, 0x00, 0x02, 0x80, 0x53, 0x00, 0x00, 0x25, 0x00, 0xFF, 0xFF, 0x25, 0x00 };
+prog_uchar PROGMEM smanet2packet_logon[] = { 0x80, 0x0C, 0x04, 0xFD, 0xFF, 0x07, 0x00, 0x00, 0x00, 0x84, 0x03, 0x00, 0x00,0xaa,0xaa,0xbb,0xbb};
+prog_uchar PROGMEM smanet2totalyieldWh[] = { 0x54, 0x00, 0x01, 0x26, 0x00, 0xFF, 0x01, 0x26, 0x00};
+prog_uchar PROGMEM smanet2settime[] = { 0x8c ,0x0a ,0x02 ,0x00 ,0xf0 ,0x00 ,0x6d ,0x23 ,0x00 ,0x00 ,0x6d ,0x23 ,0x00 ,0x00 ,0x6d ,0x23 ,0x00};
 
-//Password needs to be 12 bytes long, with zeros as trailing bytes (Assume SMA INVERTER PIN code is 0000)
-const unsigned char  SMAInverterPasscode[]={'0','0','0','0',0,0,0,0,0,0,0,0};
+//Password array needs to 12 bytes long, with zeros as trailing bytes (unused characters).
+const unsigned char  SMAInverterPasscode[]={'A','s','d','f','6','g','?','?',0,0,0,0};
 
 // Function Prototypes
 void initialiseSMAConnection();
@@ -82,201 +90,185 @@ void getTotalPowerGeneration();
 
 void setup() 
 { 
+  // Note: This project can only be powered-up during the daytime, when the SMA is running. This is because
+  //          during the day the RTC on the SMA has been set by the SunnyBeam. So the ESP32 can set it's
+  //          clock from that.
   Serial.begin(115200);          //Serial port for debugging output
-  ESP32rtc.setTime(30, 24, 15, 17, 1, 2021);  // 17th Jan 2021 15:24:30  // Need this to be accurate. Since connecting to the internet anyway, use NTP.
-} 
+  // Open Preferences with my-app namespace.
+  Serial.println("\r\n-----------------------------------");
+  Serial.println("In setup() code -- opening EEPROM");
+  dailyData.begin("ESP32_SMA", false);
+  yesterdayTopDailyYield = dailyData.getULong("topDailyYield",0);
+  Serial.print("yesterdayTopDailyYield from EEPROM = ");
+  Serial.println( yesterdayTopDailyYield );
+  // Read the bank value from EEPROM.
+  bank = dailyData.getInt("bank",1000);
+  Serial.print("bank from EEPROM = ");
+  Serial.println( bank );
+  // Read "did I adjust the bank already" bit from EEPROM.
+  bankUpdated = dailyData.getInt("bankUpdated",0);
+  Serial.print("bankUpdated from EEPROM = ");
+  Serial.println( bankUpdated );
+  dailyData.end();    // Close the EEPROM.
+        
+  pinMode(output23, OUTPUT);  // Yellow LED
+  pinMode(output22, OUTPUT);  // Green LED
+  // Set LEDs
+  digitalWrite(output23, HIGH);  // Yellow on
+  digitalWrite(output22, LOW);   // Green off
 
+  topDailyYield = 0;   // Reset the daily yield. Main loop will set updated value.
+  asleep = true;   // Assume that it is nightime, until proven otherwise;
+} 
 
 void loop() 
 { 
-  /* Removed by DRH
-  setSyncInterval(3600*2);  //2 hours
-  setSyncProvider(setTimePeriodically);  //This also fires off a refresh of the time immediately
-  */
+  // The starting section will try to connect to the SMA, and will not move on until it is possible.
+  while (1) {
+    trycount = 0;
+    do {
+      trycount++;
+      Serial.print("\r\nTrying to connect, attempt number: ");
+      Serial.println( trycount );
+      BTStart();
+    } while ( (trycount <= 3) && (BTIsConnected() == false) );
+    if( BTIsConnected() ) break;    // If connected, go ahead and resume running the loop() code.
+    Serial.println("Failed after trying to connect. Will now wait for 15 minutes, and try again.");
+    delay( 15 * 3600 * 1000 );    // Wait 15 minutes before trying again.
+  };
 
-  BTStart();
-
+  asleep = false;    // We know we are connected to the SMA inverter.
+  
+  // So make a data connection to the SMA inverter.
   initialiseSMAConnection();
-
-  //Dont really need this...
-  //InquireBlueToothSignalStrength();
-
   logonSMAInverter();
+  // This next part is about setting the ESP32 RTC.
+  getInstantACPower();
+  setTime( datetime );  // Set the ESP32 RTC clock from the SMA. "datetime" is the SMA inverter time, in time_t units. This is in UTC time.
+  calcSunriseSunset();
 
-  checkIfNeedToSetInverterTime();
+  lastRanTime = millis() - UPDATE_DELAY;
+  lastGarbageTime = millis() - GARBAGE_DELAY;
 
-  //getInverterName();
-  //HistoricData();
-  lastRanTime = millis() - 4000;
+  // TODO: If bankUpdated == 0 here, update the bank, and set bankUpdated to 1, and write bankUpdated to EEPROM.
 
   while (1) {
-    //debugMsgln("Main loop");
-
-    //HowMuchMemory();
-
-    //Populate datetime and spotpowerac variables with latest values
-    //getInstantDCPower();
-    nowTime = millis();
-    if( nowTime > (lastRanTime + 4000) ) {
-      lastRanTime = nowTime;
-      getInstantACPower();
-    }
-
-    //digitalClockDisplay(now());
-    //debugMsgln("");
-
-    //The inverter always runs in UTC time (and so does this program!), and ignores summer time, so fix that here...
-    //add 1 hour to readings if its summer
-    // DRH Temp removal of: if ((datetime>=SummerStart) && (datetime<=SummerEnd)) datetime+=60*60;
-
-#ifdef allowsleep
-    if ( (ESP32rtc.getEpoch() > (datetime+3600)) && (spotpowerac==0)) {
-      //Inverter output hasnt changed for an hour, so put Nanode to sleep till the morning
-      //debugMsgln("Bed time");
-
-      //sleeping=true;
-
-      //Get midnight on the day of last solar generation
-      // First, create a time structure to hold the answer to "At what time (in time_t seconds) is the upcoming midnight?"
-      tmElements_t tm;     
-      tm.Year = year(datetime)-1970;
-      tm.Month = month(datetime);
-      tm.Day = day(datetime);
-      tm.Hour = 23;
-      tm.Hour = hour(datetime);
-      tm.Minute = 59;
-      tm.Second = 59;
-      time_t midnight=makeTime(tm);
-
-
-      //Move to midnight
-      //debugMsg("Midnight ");digitalClockDisplay( midnight );debugMsgln("");
-
-      if (ESP32rtc.getEpoch() < midnight) {
-        //Time to calculate SLEEP time, we only do this if its BEFORE midnight
-        //on the day of solar generation, otherwise we might wake up and go back to sleep immediately!
-
-        //Workout what time sunrise is and sleep till then...
-        //longitude, latitude (london uk=-0.126236,51.500152)
-        unsigned int minutespastmidnight=ComputeSun(mylongitude,mylatitude,datetime,true);
-
-        //We want to wake up at least 15 minutes before sunrise, just in case...
-        checktime=midnight + minutespastmidnight - 15*60;
+    // This next section is the main, important, chunk of code that runs throughout the day.
+    if( asleep == false ) {
+      nowTime = millis();
+      if( (nowTime > (lastRanTime + UPDATE_DELAY)) && BTIsConnected()==true ) {
+        lastRanTime = nowTime;
+        lastGarbageTime = nowTime;
+        getInstantACPower();
+        //Serial.println("");
+        Serial.print(datetime);
+        Serial.print("  ");
+        Serial.print(value);
+        Serial.println(" Watts RMS ***");
+        getDailyYield();
+        Serial.print("Daily yield = ");
+        Serial.println( dailyYield );
+        if( dailyYield > topDailyYield ) {
+          topDailyYield = dailyYield;
+        }
+        // TODO: Now display the instantaneous power on the LED bargraph.
+        // TODO: Talk to the Arduio. Get the instantaneous power being consumed right now. Display it.
+        // TODO: From the Arduino, get the "total power consumed today"
+        // TODO: Subtract the total power consumed from the total power generated. Display it.
+      }
+      else
+      {
+        // Need to read the ESP32 BT data buffer semi-frequently to keep it (and level1packet[] buffer) from overflowing.
+        if( (nowTime > (lastGarbageTime + GARBAGE_DELAY)) && BTIsConnected()==true ) {
+          //Serial.println("*** Clearing buffers.");
+          getInstantACPower();
+          lastGarbageTime = millis();
+        }
       }
     }
-#endif      
 
-    //debugMsg("Wait for ");
-    //digitalClockDisplay( checktime );
-    //debugMsgln("");
+    // See if it is within 90 minutes of sunset AND the power level is less than 80 watts. If this is true,
+    //    go ahead and shut it down for the night.
+    if( (asleep == false) && ( (nextSunset - now()) < (90*SECS_PER_MIN)) && (spotpowerac < 100) ) {
+      Serial.println("Almost sunset. Shutting down now.");
+      BTEnd();     // Break the connection with the SMA inverter.
+      
+      // Store data to EEPROM
+      Serial.println("In \"going to sleep\" code -- opening EEPROM");
+      dailyData.begin("ESP32_SMA", false);    // Open the EEPROM
+      dailyData.putULong("dailyTotal", topDailyYield);
+      bankUpdated = 0;        // Indicate that when we wake up tomorrow, need to update the bank.
+      dailyData.putInt("bankUpdated", bankUpdated);
+      if( bank < 0 ) bank = 0;        // The bank is never negative.
+      dailyData.putInt("bank", bank);
+      dailyData.end();                      // Close the EEPROM.
+      // Wait for EEPROM write to finish. Give it plenty of time.
+      delay(10000);
+      
+      asleep = true;
+      wakeUpNow = nextSunrise;
+    }
 
-    //Delay for approx. 4 seconds between instant AC power readings
+    // See if it is time to wake up.
+    if( (asleep == true) && (now() > wakeUpNow) ) {
+      Serial.println("Time to wake up.");
+      trycount = 0;
+      do {
+        trycount++;
+        Serial.print("\r\nTrying to connect, attempt number: ");
+        Serial.println( trycount );
+        BTStart();
+      } while ( (trycount <= 3) && (BTIsConnected() == false) );
+      if( BTIsConnected() ) {
+        // Once newly connected, login, and calculate the upcoming sunrise and sunset times.
+        asleep = false;
+        initialiseSMAConnection();
+        logonSMAInverter();
+        // This next part is about synch'ing the ESP32 RTC with the SMA inverter prior to sunrise calc.'s
+        getInstantACPower();
+        calcSunriseSunset();
+
+        Serial.println("In \"just waking up now\" code -- opening EEPROM");
+        dailyData.begin("ESP32_SMA", false);    // Open the EEPROM
+        
+        // Read yesterday's "total power consumed" from the Arduino.
+        
+        // Read yesterday's "total power generated" from EEPROM.
+        topDailyYield = dailyData.getULong("topDailyYield",0);
+        Serial.print("topDailyYield from EEPROM = ");
+        Serial.println( topDailyYield );
+        // Read the bank value from EEPROM.
+        bank = dailyData.getInt("bank",0);
+        Serial.print("bank from EEPROM = ");
+        Serial.println( bank );
+        // Read "did I adjust the bank already" bit from EEPROM. If not:
+        bankUpdated = dailyData.getInt("bankUpdated",0);
+        Serial.print("bankUpdated from EEPROM = ");
+        Serial.println( bankUpdated );
+        
+        //    TODO:  Subtract "power consumed" from "power generated"
+        //    TODO:  Calculate new bank value, and store it to EEPROM.
+        //    TODO:  Set the "I already did the calculations" bit in EEPROM, so I don't repeat this.
+        bankUpdated = 1;        // Indicate that the bank calculations have been done today.
+        dailyData.putInt("bankUpdated", bankUpdated);
+        
+        dailyData.end();                      // Close the EEPROM.
+        // Wait for EEPROM write to finish. Give it plenty of time.
+        delay(10000);
+      }
+      else {
+        Serial.println("Failed after trying to connect. Will now wait for 5 minutes, and try again.");
+        delay( 5 * SECS_PER_MIN * 1000 );    // Wait 5 minutes before trying again.
+      }
+    }     // End of "waking up" section
+
+    // If we have unsucessfully tried to connect for 4 hours after the sun rose, restart the hardware.
+    if( (asleep == true) && (now() < (wakeUpNow+(4*SECS_PER_HOUR))) && (now() > wakeUpNow) ) {
+      error();    // Reboot the ESP32.
+    }
 
   }  // end of while(1)
 }   // end of loop()
-
-//-------------------------------------------------------------------------------------------
-void checkIfNeedToSetInverterTime() {
-  //We dont actually use the value this returns, but "datetime" is set from its reply
-  getDailyYield();
-
-  //digitalClockDisplay(now());Serial.println("");
-  //digitalClockDisplay(datetime);Serial.println("");
-
-  unsigned long timediff;
-
-  if (datetime > ESP32rtc.getEpoch()) timediff=datetime - ESP32rtc.getEpoch();  // DRH was now()
-  else timediff = ESP32rtc.getEpoch() - datetime;                // DRH was now()
-
-  if (timediff > 60) {
-    //If inverter clock is out by more than 1 minute, set it to the time from NTP, saves filling up the 
-    //inverters event log with hundred of "change time" lines...
-    setInverterTime();  //Set inverter time to now()
-  }
-}
-
-
-prog_uchar PROGMEM smanet2settime[]=  {  
-  0x8c ,0x0a ,0x02 ,0x00 ,0xf0 ,0x00 ,0x6d ,0x23 ,0x00 ,0x00 ,0x6d ,0x23 ,0x00 ,0x00 ,0x6d ,0x23 ,0x00
-};
-
-void setInverterTime() {
-  //Sets inverter time for those SMA inverters which don't have a realtime clock (Tripower 8000 models for instance)
-
-  //Payload...
-
-  //** 8C 0A 02 00 F0 00 6D 23 00 00 6D 23 00 00 6D 23 00 
-  //   9F AE 99 4F   ==Thu, 26 Apr 2012 20:22:55 GMT  (now)
-  //   9F AE 99 4F   ==Thu, 26 Apr 2012 20:22:55 GMT  (now) 
-  //   9F AE 99 4F   ==Thu, 26 Apr 2012 20:22:55 GMT  (now)
-  //   01 00         ==Timezone +1 hour for BST ?
-  //   00 00 
-  //   A1 A5 99 4F   ==Thu, 26 Apr 2012 19:44:33 GMT  (strange date!)
-  //   01 00 00 00 
-  //   F3 D9         ==Checksum
-  //   7E            ==Trailer
-
-  //Set time to Feb
-
-  //2A 20 63 00 5F 00 B1 00 0B FF B5 01 
-  //7E 5A 00 24 A3 0B 50 DD 09 00 FF FF FF FF FF FF 01 00 
-  //7E FF 03 60 65 10 A0 FF FF FF FF FF FF 00 00 78 00 6E 21 96 37 00 00 00 00 00 00 01 
-  //** 8D 0A 02 00 F0 00 6D 23 00 00 6D 23 00 00 6D 23 00 
-  //14 02 2B 4F ==Thu, 02 Feb 2012 21:37:24 GMT
-  //14 02 2B 4F ==Thu, 02 Feb 2012 21:37:24 GMT 
-  //14 02 2B 4F  ==Thu, 02 Feb 2012 21:37:24 GMT
-  //00 00        ==No time zone/BST not applicable for Feb..
-  //00 00 
-  //AD B1 99 4F  ==Thu, 26 Apr 2012 20:35:57 GMT 
-  //01 00 00 00 
-  //F6 87        ==Checksum
-  //7E
-
-  //2A 20 63 00 5F 00 B1 00 0B FF B5 01 
-  //7E 5A 00 24 A3 0B 50 DD 09 00 FF FF FF FF FF FF 01 00 
-  //7E FF 03 60 65 10 A0 FF FF FF FF FF FF 00 00 78 00 6E 21 96 37 00 00 00 00 00 00 1C 
-  //** 8D 0A 02 00 F0 00 6D 23 00 00 6D 23 00 00 6D 23 00 
-  //F5 B3 99 4F 
-  //F5 B3 99 4F 
-  //F5 B3 99 4F 01 00 00 00 28 B3 99 4F 01 00 00 00 
-  //F3 C7 7E
-
-  //2B 20 63 00 5F 00 DD 00 0B FF B5 01 
-  //7E 5A 00 24 A3 0B 50 DD 09 00 FF FF FF FF FF FF 01 00 
-  //7E FF 03 60 65 10 A0 FF FF FF FF FF FF 00 00 78 00 6E 21 96 37 00 00 00 00 00 00 08 
-  //** 80 0A 02 00 F0 00 6D 23 00 00 6D 23 00 00 6D 23 00 
-  //64 76 99 4F ==Thu, 26 Apr 2012 16:23:00 GMT 
-  //64 76 99 4F ==Thu, 26 Apr 2012 16:23:00 GMT 
-  //64 76 99 4F  ==Thu, 26 Apr 2012 16:23:00 GMT
-  //58 4D   ==19800 seconds = 5.5 hours
-  //00 00 
-  //62 B5 99 4F 
-  //01 00 00 00 
-  //C3 27 7E 
-
-  debugMsgln("setInvTime ");
-  time_t currenttime = ESP32rtc.getEpoch();  // Returns the ESP32 RTC in number of seconds since the epoch (normally 01/01/1970)
-  //digitalClockDisplay(currenttime);
-  writePacketHeader(level1packet);
-  writeSMANET2PlusPacket(level1packet,0x09, 0x00, packet_send_counter, 0, 0, 0);
-  writeSMANET2ArrayFromProgmem(level1packet,smanet2settime,sizeof(smanet2settime));
-  writeSMANET2Long(level1packet,currenttime);
-  writeSMANET2Long(level1packet,currenttime);
-  writeSMANET2Long(level1packet,currenttime); 
-  writeSMANET2uint(level1packet,timeZoneOffset);  
-  writeSMANET2uint(level1packet,0);
-  writeSMANET2Long(level1packet,currenttime);  //No idea what this is for...
-  writeSMANET2ArrayFromProgmem(level1packet,smanet2packet0x01000000,sizeof(smanet2packet0x01000000));
-  writeSMANET2PlusPacketTrailer(level1packet);
-  writePacketLength(level1packet);
-  sendPacket(level1packet);
-  packet_send_counter++;
-  //debugMsgln(" done");
-}
-
-
-prog_uchar PROGMEM smanet2totalyieldWh[]=  {  
-  0x54, 0x00, 0x01, 0x26, 0x00, 0xFF, 0x01, 0x26, 0x00};
 
 void getTotalPowerGeneration() {
   //Gets the total kWh the SMA inverter has generated in its lifetime...
@@ -363,11 +355,8 @@ void initialiseSMAConnection() {
   sendPacket(level1packet);
   packet_send_counter++;
   //No reply for this message...
+  return;
 }
-
-
-prog_uchar PROGMEM smanet2packet_logon[]={ 
-  0x80, 0x0C, 0x04, 0xFD, 0xFF, 0x07, 0x00, 0x00, 0x00, 0x84, 0x03, 0x00, 0x00,0xaa,0xaa,0xbb,0xbb};
 
 void logonSMAInverter() {
   //Third SMANET2 packet
@@ -393,6 +382,7 @@ void logonSMAInverter() {
   while (!validateChecksum());
   packet_send_counter++;
   debugMsgln("Done");
+  return;
 }
 
 void getDailyYield() {
@@ -441,13 +431,12 @@ void getDailyYield() {
     memcpy(&value,&level1packet[40+8+1],3);
     //0x2622=Day Yield Wh
     memcpy(&datetime,&level1packet[40+4+1],4);  
-    //setTime(datetime);  
+    dailyYield = value;
   }
+  return;
 }
 
-prog_uchar PROGMEM smanet2acspotvalues[]=  {  
-  0x51, 0x00, 0x3f, 0x26, 0x00, 0xFF, 0x3f, 0x26, 0x00, 0x0e};
-
+//----------------------------------------------------------------------------------------------
 void getInstantACPower() 
 {
   //Get spot value for instant AC wattage
@@ -468,31 +457,30 @@ void getInstantACPower()
 
   //value will contain instant/spot AC power generation along with date/time of reading...
   memcpy(&datetime,&level1packet[40+1+4],4);
+  //Serial.print("Just read time from SMS. datetime = ");
+  //Serial.println(datetime);
   memcpy(&value,&level1packet[40+1+8],3);
   debugMsg("AC ");
   //Serial.println(" ");
   //Serial.println("Got AC power level. ");
   //digitalClockDisplay(datetime);
   debugMsg(" Pwr=");
-  //if( value != oldvalue ) {
-    //Serial.println(" ");
-    //Serial.print("*** Power Level = ");
-    Serial.print(value);
-    //Serial.println(" Watts RMS ***");
-    //Serial.print(" ");
-    Serial.println("");
-    oldvalue = value;
-  //}
+  //Serial.println(" ");
+  //Serial.print("*** Power Level = ");
+  //Serial.print(value);
+  //Serial.println(" Watts RMS ***");
+  //Serial.print(" ");
+  //Serial.print(datetime);
+  //Serial.print("  ");
   spotpowerac=value;
 
   //displaySpotValues(28);
+  return;
 }
+//-------------------------------------------------------------------------------------------------------
 
-//Returns volts + amps
-//prog_uchar PROGMEM smanet2packetdcpower[]={  0x83, 0x00, 0x02, 0x80, 0x53, 0x00, 0x00, 0x45, 0x00, 0xFF, 0xFF, 0x45, 0x00 };
-// Just DC Power (watts)
-prog_uchar PROGMEM smanet2packetdcpower[]={  
-  0x83, 0x00, 0x02, 0x80, 0x53, 0x00, 0x00, 0x25, 0x00, 0xFF, 0xFF, 0x25, 0x00 };
+//Returns volts + amps. Just DC Power (watts)
+
 void getInstantDCPower() {
 
   //DC
@@ -538,8 +526,99 @@ void getInstantDCPower() {
   //debugMsg(" V=");Serial.print(volts);debugMsg("  A=");Serial.print(amps);
   debugMsg(" Pwr=");
   Serial.println(spotpowerdc);  
+  return;
 }
 
+static unsigned int  ComputeSun(float longitude, float latitude, time_t when, bool rs) {
+//Borrowed from TimeLord library http://swfltek.com/arduino/timelord.html
+//rs=true for sunrise, false=sunset
+
+  uint8_t a;
+
+  float lon = -longitude/57.295779513082322;  // Convert lat/long location to radians
+  float lat = latitude/57.295779513082322;
+
+  //approximate hour;
+  a=6;  //6am
+  if(rs) a=18;  //6pm
+
+  // approximate day of year
+  float y= (month(when)-1) * 30.4375 + (day(when)-1)  + a/24.0; // 0... 365
+
+  // compute fractional year
+  y *= 1.718771839885e-02; // 0... 1
+
+  // compute equation of time... .43068174
+  float eqt=229.18 * (0.000075+0.001868*cos(y)  -0.032077*sin(y) -0.014615*cos(y*2) -0.040849*sin(y* 2) );
+
+  // compute solar declination... -0.398272
+  float decl=0.006918-0.399912*cos(y)+0.070257*sin(y)-0.006758*cos(y*2)+0.000907*sin(y*2)-0.002697*cos(y*3)+0.00148*sin(y*3);
+
+  //compute hour angle
+  float ha=(  cos(1.585340737228125) / (cos(lat)*cos(decl)) -tan(lat) * tan(decl)  );
+
+  if(fabs(ha)>1.0){// we're in the (ant)arctic and there is no rise(or set) today!
+    return when; 
+  }
+
+  ha=acos(ha); 
+  if(rs==false) ha=-ha;
+
+  // compute minutes from midnight
+  return 60*(720+4*(lon-ha)*57.295779513082322-eqt);
+}
+
+// This routine calculates the LOCAL time of the next sunrise and sunset. Results are in UTC time.
+// NOTE: If the time (UTC) has passed UTC midnight (at 5 pm DST Seattle time) then the results need to have
+//         24 hours subtracted from the answer.
+void calcSunriseSunset( void ) {
+  tmElements_t tm;        // Temporary structure used to calculate "at what UTC time_t is the upcoming midnight?"
+  time_t timeNow2;
+  time_t midnight_2_local_sunrise;
+  time_t midnight_2_local_sunset;
+  time_t midnight;
+
+  timeNow2 = now();   // Read the time from the ESP32 RTC. (result is in time_t seconds)
+  Serial.print("Now (UTC time_t) = ");
+  Serial.println( timeNow2 );
+  // This next section computes the time of the upcoming midnight, at the Prime Meridian. (Midnight in/at UTC, in time_t seconds.)
+  tm.Year = year( timeNow2 )-1970;
+  tm.Month = month( timeNow2 );
+  tm.Day = day( timeNow2 );
+  tm.Hour = 23;
+  tm.Minute = 59;
+  tm.Second = 59;
+  midnight=makeTime(tm);
+  //Serial.print("Midnight UTC @ time_t = ");
+  //Serial.println(midnight);
+
+  // Now compute how many seconds past midnight (the future, upcoming UTC midnight) is the SUNRISE event *at our location*.
+  calc_sunrise = true;
+  midnight_2_local_sunrise = ComputeSun( -122.3088, 47.4503, timeNow2, calc_sunrise);
+  nextSunrise = midnight + midnight_2_local_sunrise;
+  
+  // Now compute how many seconds, from now, until the SUNSET *at our location*.
+  calc_sunrise = false;    // Calc sunset.
+  midnight_2_local_sunset = ComputeSun( -122.3088, 47.4503, timeNow2, calc_sunrise);
+  nextSunset = (midnight - SECS_PER_DAY) + midnight_2_local_sunset;
+  
+  // If it says the next sunrise is more than 24 hours from now, subtract 24 hours from both results.
+  if( (nextSunrise - now()) > (25*SECS_PER_HOUR) ) {
+    nextSunrise -= 24 * SECS_PER_HOUR;
+    nextSunset  -= 24 * SECS_PER_HOUR;
+  }
+
+  //Serial.print("Num. of seconds from midnight to sunrise = ");
+  //Serial.println(midnight_2_local_sunrise);
+  //Serial.print("Num. of seconds from midnight to sunset = ");
+  //Serial.println(midnight_2_local_sunset);
+  Serial.print("So the next sunrise at this location will occur at UTC time_t = ");
+  Serial.println( nextSunrise );
+  Serial.print("So the next sunset at this location will occur at UTC time_t = ");
+  Serial.println( nextSunset );
+  
+  return;
+}
 /*
 //Inverter name
  prog_uchar PROGMEM smanet2packetinvertername[]={   0x80, 0x00, 0x02, 0x00, 0x58, 0x00, 0x1e, 0x82, 0x00, 0xFF, 0x1e, 0x82, 0x00};  

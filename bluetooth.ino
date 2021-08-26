@@ -18,7 +18,10 @@ const char *pin = &pinbuf[0];
 bool connected;
 static long charTime = 0;
 
-void BTStart() {
+//---------------------------------------------------------
+int BTStart() {
+  int success = 0;
+  
   SerialBT.begin("ESP32test", true);   // "true" creates this device as a BT Master.
   SerialBT.setPin(pin);   // pin as in "PIN" This is the BT connection pin, not login pin. ALWAYS 0000, unchangable.
   Serial.println("The SM32 started in master mode. Now trying to connect to SMA inverter.");
@@ -26,19 +29,32 @@ void BTStart() {
 
   if(connected) {
     Serial.println("Connected succesfully!");
-    //digitalWrite(output22, HIGH);  // Green on
-    //digitalWrite(output23, LOW);  // Yellow off
+    digitalWrite(output22, HIGH);  // Green on
+    digitalWrite(output23, LOW);  // Yellow off
+    success = 1;
   } else {
-    while(!SerialBT.connected(10000)) {
+    //while(!SerialBT.connected(2000)) {
       Serial.println("Failed to connect. Make sure remote device is available and in range, then restart app."); 
-      //digitalWrite(output23, LOW);  // Yellow off
-      //digitalWrite(output22, LOW);  // Green off
-    }
+      digitalWrite(output23, LOW);  // Yellow off
+      digitalWrite(output22, LOW);  // Green off
+      success = 0;
+    //}
   }
+  return success;
 }
-
+//------------------------------------------------------
+bool BTEnd() {
+  digitalWrite(output23, LOW);  // Yellow off
+  digitalWrite(output22, LOW);  // Green off
+  return ( SerialBT.disconnect() );
+}
+//------------------------------------------------------
+bool BTIsConnected() {
+  return ( SerialBT.connected(2000) );
+}
+//------------------------------------------------------
 void sendPacket( unsigned char *btbuffer ) {
-  //quickblink();
+  quickblink();
   //Serial.println();
   //Serial.println("Sending: ");
   for(int i=0;i<packetposition;i++) {
@@ -49,13 +65,11 @@ void sendPacket( unsigned char *btbuffer ) {
   //Serial.println();
 }
 
-/* by DRH. Not ready to blink LEDs yet.
 void quickblink() {
-  digitalWrite( RED_LED, LOW);
-  delay(30);
-  digitalWrite( RED_LED, HIGH);
+  digitalWrite(output23, HIGH);  // Yellow on
+  delay(20);
+  digitalWrite(output23, LOW);  // Yellow off
 }
-*/
 
 void writeArrayIntoEEPROM(unsigned char readbuffer[],int length,int EEPROMoffset) {
   //Writes an array into EEPROM and calculates a simple XOR checksum

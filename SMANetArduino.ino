@@ -32,6 +32,7 @@ unsigned int readLevel1PacketFromBluetoothStream(int index) {
     debugMsgln("Inv hdr");
     Serial.println("*** Invalid header chksum.");
     errorCodePCS = true;
+    return 0xFFFF;
   }
   
   for (int i=0; i<6; i++)  Level1SrcAdd[i]=getByte();
@@ -42,6 +43,7 @@ unsigned int readLevel1PacketFromBluetoothStream(int index) {
   //Serial.println(" ");
   //Serial.print("packetlength = ");
   //Serial.println(packetlength);
+  //if (packetlength > 120) packetlength = 120;
 
   if ( ValidateSenderAddress() ) {
     //Serial.println("*** Message is from SMA.");
